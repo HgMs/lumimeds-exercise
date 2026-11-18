@@ -6,7 +6,7 @@
 > **本文只讲「题目本身和怎么交」**。产品要做成什么样，见
 > [`REQUIREMENTS.md`](REQUIREMENTS.md)；数据结构和接口形状，见
 > [`DATA-CONTRACTS.md`](DATA-CONTRACTS.md)。文档分工见
-> [`README.md`](README.md)，agent 工作约定见根目录 [`AGENTS.md`](../AGENTS.md)。
+> [`README.md`](README.md)，仓库现状与约束见根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 1. 时间盒
 
@@ -152,6 +152,6 @@
 | 行为规范 | `docs/REQUIREMENTS.md` |
 | 数据与接口契约 | `docs/DATA-CONTRACTS.md` |
 | 文档索引与术语 | `docs/README.md` |
-| agent 工作约定 | 根 `AGENTS.md` |
+| 仓库现状与约束 | 根 `AGENTS.md` |
 | 提交用 README | 根 `README.md`（交付前重写） |
 | 本文档 | `docs/ASSIGNMENT.md` |
