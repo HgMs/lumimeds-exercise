@@ -132,6 +132,8 @@ interface Order {
 | 未知 `type` | 200 | 记日志，忽略 |
 | `occurred_at` 解析失败 | 400 | 不处理 |
 | `simulation.started` 缺 `config` 或 `pharmacyApi` | 500 | 记错误（数据有问题，不该发生） |
+| 有 `order`/`email` 但没有会话（`simulation.started` 未成功处理，或 `state.json` 不可用） | 500 `no_session` | 不建会话、不写盘，记 error。事件会丢（模拟器只对 socket 错误重投）；这是刻意的：会话的输入（config、facts、`sent_orders`）无处可造，见 `ARCHITECTURE` §16-Q3 |
+| body 超过 1 MiB | 413 | 不解析、不处理（`ARCHITECTURE` §5.11） |
 | 重复 `event_id` | 200 | 直接返回，不产生副作用 |
 
 ## 2. 外部 API（我们 → 模拟器的药房 API）
@@ -153,10 +155,11 @@ interface Order {
 | 状态 | 含义 | 我们的处理 |
 |---|---|---|
 | 201 | 已发，终局 | 记 `sent_orders[order_id]`，写决策日志 |
-| 409 | 已发过 | 记 warning；视为已发；**不重试**（正常情况下不该出现） |
+| 409 | 已发过 | 记 warning；视为已发；**不重试**（崩溃恢复重发时会出现，sim 会记 `sent more than once`） |
 | 400 | body 不合法（我们的 bug） | 记 error + 告警；**不重试**，重试也不会成功 |
 | 404 | 路径错，或订单不在本周 | 记 error + 告警；**不重试** |
-| 5xx / 超时 | 服务端问题（可重试） | 退避重试 3 次（250/500/1000ms），仍失败进后台队列 |
+| 5xx | 服务端问题，结果未知 | 退避 250/500/1000ms 对**同一药房**内联重试；次数受 25s 事件预算约束（`ARCHITECTURE` §1-C2），仍失败进后台队列（同药房） |
+| 超时 / 连接被断 | **结果未知**：可能已被受理 | 与 5xx 相同：只对同一药房重发（幂等），**绝不改派**——改派会把同一单发给两家 |
 
 发送顺序：**先发单，再回 webhook**，保证订单被算在 `during_event`，且下一步路由
 看到的是最新容量。
@@ -231,7 +234,7 @@ interface CandidateEvaluation {
   shipsInDays: number;
   price: number | null;
   capacityLeft: number;
-  failures: string[];   // "closed" | "state_blocked:NJ" | "no_stock:tirzepatide:7.5mg" | "capacity_full"
+  failures: FailureCode[];   // 定义见 ARCHITECTURE §5.7：closed | state_blocked:NJ | no_stock:tirzepatide:7.5mg | capacity_full
 }
 ```
 
@@ -271,7 +274,8 @@ interface SamEntry {
 ### 3.6 持久化：`data/state.json`
 
 每个事件处理完后原子写（临时文件 + rename）。重启时读回；收到
-`simulation.started` 时清空。
+`simulation.started` 时**用一次原子写覆盖**（不先删除旧文件——`clear` 与 `save` 之间
+崩溃会让磁盘上没有状态，而模拟器只对 socket 错误重投 15s）。
 
 ```ts
 interface PersistedState {
@@ -281,15 +285,37 @@ interface PersistedState {
   config: SimConfig;
   facts: Fact[];
   seen_event_ids: string[];
-  sent_orders: Record<string, { pharmacy: PharmacyId | "MANUAL"; at: Iso }>;
+  sent_orders: Record<string, { pharmacy: PharmacyId | "MANUAL"; at: Iso }>;   // at = 该订单事件的 occurred_at，不是发单墙钟
   decisions: Record<string, RoutingDecision>;
   sam: SamEntry[];
   seq: { fact: number };
+  last_event_at: Iso;      // 新增（2026-11-18）：GET /state 的求值时刻；初值 = week_started_at
+  degraded: boolean;       // 新增（2026-11-18）：写盘曾失败过，/health 暴露
 }
 ```
 
 写盘时机：订单事件在**发单成功之后、回 webhook 之前**；邮件事件在应用 fact 或挂进
-Sam 列表之后。这样进程在任意位置崩溃，重启后都不会重复发单、也不会重复应用 fact。
+Sam 列表之后。这样进程在任意位置崩溃，重启后都不会重复应用 fact；发单的歧义由
+`data/inflight.json` 的 WAL 处理（恢复时按 WAL 药房原样重发，`409` 视为已发，见
+`REQUIREMENTS` §6）。
+
+`capacity` 的当日计数**不进快照**：恢复时由 `sent_orders` + 时区重新派生，避免
+「快照说发了、计数说没发」两份真值。
+
+### 3.8 发单 WAL：`data/inflight.json`
+
+发单**之前**写、`201`/`409` 之后删；崩溃恢复靠它区分「已发」与「不确定」。
+整文件重写即可（条目数 = 同时在途订单数，通常 ≤ 1）。
+
+```ts
+interface InflightEntry {
+  order_id: OrderId;
+  pharmacy: PharmacyId | "MANUAL";
+  at: Iso;                  // 原始决策时刻（业务时间），恢复时用它记容量与 ET 日期
+  decision_reason: string | null;
+  started_at_real_clock: Iso;   // 仅排查用，不参与任何业务判断
+}
+```
 
 ### 3.7 审计文件
 
@@ -311,6 +337,15 @@ Sam 列表之后。这样进程在任意位置崩溃，重启后都不会重复�
 ```
 
 `outcome` 取值：`applied` / `rejected` / `no_change`。
+
+**可选附加字段**（2026-11-18，便于事后解释「为什么采用这个日期」；只增不改）：
+
+```jsonc
+{"sources":{"from":"parser:until_weekday","until":"model"}   // 每个时间字段的来源
+ "assumptions":["no until → indefinite"],                     // 采取的安全侧假设
+ "dateOverrides":[{"field":"until","model":"2026-11-11","used":"2026-11-11T00:00:00-05:00","source":"parser:until_weekday"}],
+ "extraction":{ /* 仅 rejected：模型原始输出 */ }}
+```
 
 ## 4. LLM 抽取契约
 
@@ -389,21 +424,25 @@ EMAIL>>>
 | 检查 | 失败时 |
 |---|---|
 | `type` 属于枚举 | 拒绝 |
-| `pharmacy` 能解析到 config（id 或 name） | 拒绝 |
+| `pharmacy` 能解析到 config（id 或 name）；**药房发件人可为空**（默认自己那家），ops 不可为空 | 拒绝 |
 | `medication` 在 catalogue 里 | 拒绝 |
 | `dose` 精确等于 catalogue 里某档 | 拒绝（`25mg` 在这里被挡） |
 | 每个 `states` 能归一化 | 拒绝 |
+| 该类型必填字段齐全（§4.2 的 `required` 之外，见 `REQUIREMENTS` §10） | 拒绝 |
 | `from_date` / `until_date` 是合法日期 | 拒绝 |
-| `until > from` | 拒绝 |
-| 日期落在 `[week_start, week_start + 14 天]` | 拒绝 |
-| `phrase` 能被确定性解析器识别 | 用解析器的结果覆盖模型日期，并记录差异 |
+| `until > from` | 若 `until` 早于/等于 `from`（例如周一收到 "until Monday"），先改取**下一个**该星期；仍不满足才拒绝 |
+| 日期落在 `[week_start, week_start + 14 天]`（闭区间，两端都含） | 拒绝 |
+| `phrase` 能被确定性解析器识别 | **逐字段合并**：只覆盖解析出的字段；与模型日期同日不算冲突 |
+| `phrase` 解析结果与模型日期**按 ET 日期**不一致 | 拒绝，进 Sam |
 | 发件人对该药房有权限 | 拒绝，进 Sam |
 | `routing_preference` 来自 ops | 拒绝，进 Sam |
+| `type: "no_change"` | 不是 fact：丢弃该候选；整封只有它时记 `no_change` 审计 |
 
 确定性解析器只认一组封闭短语：`immediately`、`today`、`tomorrow`、`yesterday`、
 星期名（`Wednesday`）、`next <weekday>`、`end of week` / `rest of the week`、
-`until <…>`、`from <…>`、`back on <…>`。识别不了但模型日期合法且 `confidence=high`
-时，采用模型日期并标注 `source: "llm"`；否则进 Sam。
+`until <…>`、`from <…>`、`back on <…>`。一句话里可以同时命中 `from` 与 `until` 两个
+子句（如 `evt_027`）。识别不了但模型日期合法且 `confidence=high` 时，采用模型日期并
+标注 `source: "llm"`；否则进 Sam。每字段的来源写进 `out/facts.jsonl` 的 `sources`。
 
 ### 4.4 失败处理
 
@@ -416,11 +455,14 @@ EMAIL>>>
 
 | 方法 | 路径 | 用途 | 返回 |
 |---|---|---|---|
-| POST | `/webhooks` | 模拟器入口 | 2xx（body 忽略）；坏请求 400 |
+| POST | `/webhooks` | 模拟器入口 | 2xx（body 忽略）；坏请求 400；超 1 MiB 413 |
 | GET | `/orders/:id` | 解释某个订单的路由决定 | `RoutingDecision` / 404 |
 | GET | `/sam` | Sam 列表 | `SamEntry[]` |
-| GET | `/health` | 存活与计数 | `{ok, events, orders_sent, sam}` |
-| GET | `/state` | 当前派生视图（调试/演示） | `PharmacyView[]` |
+| GET | `/health` | 存活与计数 | `{ok, events, orders_sent, sam, pending_sends, degraded}` |
+| GET | `/state` | 当前派生视图（调试/演示） | `PharmacyView[]`；**无会话时 200 `[]`** |
+
+`/health` 的 `pending_sends`（在重试队列里的订单数）与 `degraded`（写盘曾失败过）是
+`ARCHITECTURE` §16-Q9 登记的新增字段；其余字段按本表。
 
 `POST /webhooks` 的响应只表达「我收到了」；路由结果在 `out/run-log.jsonl` 和
 `/orders/:id` 里查。响应体固定为 `{"ok":true}`，方便排错。
@@ -436,6 +478,8 @@ EMAIL>>>
 | `DATA_DIR` | `./data` | `state.json` 位置 |
 | `OUT_DIR` | `./out` | 审计日志位置 |
 | `TZ` | `America/New_York` | 仅用于日期格式化，不用于取「现在」 |
+| `LLM_MODE` | `live` | `live` 走真实 API；`replay` 从 fixture 回放（**仅测试/离线演示**，不写进 README 的正式跑法） |
+| `INFLIGHT_FILE` | `./data/inflight.json` | 发单 WAL 位置（§3.8）；通常不用改 |
 
 ## 7. week A 事实清单（已核对）
 

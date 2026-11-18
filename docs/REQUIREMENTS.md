@@ -112,10 +112,10 @@ POST {pharmacyApi}/pharmacy-orders
 | Fact | 字段 | 谁能断言 |
 |---|---|---|
 | `stock_unavailable` | pharmacy、medication、dose、from、until? | 该药房、ops |
-| `stock_available` | pharmacy、medication、dose、from | 该药房、ops |
+| `stock_available` | pharmacy、medication、dose、from、until? | 该药房、ops |
 | `state_blocked` | pharmacy、state、from、until? | 该药房、ops |
 | `state_allowed` | pharmacy、state、from | 该药房、ops |
-| `closed` | pharmacy、from、until | 该药房、ops |
+| `closed` | pharmacy、from、until? | 该药房、ops |
 | `reopened` | pharmacy、from | 该药房、ops |
 | `capacity` | pharmacy、perDay、from、until? | 该药房、ops |
 | `routing_preference` | pharmacy、medication、dose?、state?、from、until? | **仅 ops** |
@@ -124,6 +124,12 @@ POST {pharmacyApi}/pharmacy-orders
 `from` 缺省时取邮件的 `occurred_at`（即「立即生效」）。`until` 缺省表示一直有效。
 "until X" 在 X 日 00:00 ET 排他结束，所以「until Wednesday 缺货」的意思是周三
 恢复。
+
+**`until` 缺省不等于必须拒绝**：`closed`、`stock_unavailable`、`routing_preference`
+没写结束时间时按「无限期」生效（`closed`/`stock_unavailable` 属否定类事实，按无限期
+处理是安全侧；拒绝它们反而会把「营业/有货」的旧信念留在原地）。这类判定要在审计里
+留一条「假设」，不进 Sam 列表——Sam 的语义是「未生效、等人决定」。
+（见 §10 的取舍表与 `ARCHITECTURE` §16-Q18）
 
 fact 只有通过校验（第 4.3 节）才会生效。校验不通过、或抽取结果映射不到已知
 药房/剂量/州的 fact，一律不碰状态。
@@ -186,12 +192,15 @@ LLM 永远不为订单选药房，也不写路由代码，只把自然语言变�
 候选 fact 必须同时满足以下条件才生效：
 
 1. 发件人对该药房有权限（第 4.1 节）。
-2. `pharmacy` 能解析到 config 里的 id 或名称。
+2. `pharmacy` 能解析到 config 里的 id 或名称。**药房发件人可以省略 `pharmacy`**
+   （默认取发件人自己那家）；ops 发件人必须显式写，否则拒绝。
 3. `medication` 是目录里的键，`dose` 是目录里的精确剂量。**不做模糊匹配、不做
    单位推断**：`25mg` 这种不存在的剂量直接拒绝。
 4. 每个州都能归一化成合法的两位码（`Texas` → `TX`）。
-5. 区间合法：`until > from`，时间可解析，且日期落在本周窗口内（不早于本周开始，
-   不晚于本周开始 + 14 天）。
+5. 区间合法：`until > from`，时间可解析，且日期落在本周窗口内。窗口是**闭区间**
+   `[本周开始, 本周开始 + 14 天]`，两端都含：不早于本周开始，不晚于本周开始 + 14 天；
+   恰好等于第 15 天 00:00 的 `until` 也接受。取闭区间是因为拒绝一封其实合法的邮件会把
+   信念留在旧值（不安全侧），而多接受一天无害。
 6. `routing_preference` 必须来自 ops 地址。
 7. fact 类型存在，必填字段齐全。
 
@@ -217,10 +226,17 @@ LLM 永远不为订单选药房，也不写路由代码，只把自然语言变�
 
 代码侧另有一个**封闭短语的确定性解析器**（只认 `immediately`、`today`、
 `tomorrow`、`yesterday`、星期名、`next <weekday>`、`end of week` /
-`rest of the week`、`until <…>`、`from <…>`、`back on <…>`）。它能识别时用它的
-结果覆盖模型日期并记录差异；识别不了时，只有模型日期合法且 `confidence=high`
-才采用模型日期（标注来源），否则进 Sam。规则见
-[`DATA-CONTRACTS.md`](DATA-CONTRACTS.md) §4.3。
+`rest of the week`、`until <…>`、`from <…>`、`back on <…>`）。它与模型日期是
+**逐字段合并**的关系，不是整段覆盖：
+
+- 解析器只覆盖它实际解析出的字段（`from` 或 `until`），另一个字段保留模型值；
+- 两侧都给了时间时**粒度可以不同**（解析器给「立即生效」是瞬时刻，模型给的是
+  `YYYY-MM-DD`）——按 ET 日期比较，同日不算冲突，采用解析器的瞬时刻；
+- 只有**日期不同**才算冲突，整封进 Sam（`phrase` 是模型抄下来的文本，可能被截断，
+  例如 "until Wednesday" 被抄成 "Wednesday" 会让区间语义反转）；
+- 解析器认不出时，只有模型日期合法且 `confidence=high` 才采用（标注来源），否则进 Sam。
+
+规则见 [`DATA-CONTRACTS.md`](DATA-CONTRACTS.md) §4.3。
 
 ### 4.5 更正与取代
 
@@ -288,16 +304,33 @@ else:
 ## 6. 幂等与持久化
 
 - `seen_event_ids` 持久化。重复投递直接 200，什么都不改。week A 的三次重投全
-  由它覆盖。
-- `sent_orders` 记录 `order_id → pharmacy`。每个订单最多发一次，**不依赖**药房
-  API 的 `409`。
+  由它覆盖。**唯一例外是 `simulation.started`**：它永远是一周的第一个事件，按
+  「收到就重置」处理（不受幂等门约束），否则第二次重放同一个周文件会整周被判成重复。
+- `sent_orders` 记录 `order_id → pharmacy`。正常路径每个订单只发一次，**不靠**
+  药房 API 的 `409` 去重；唯一的例外是崩溃恢复窗口（见下）。
 - 每个事件处理完，把状态原子写入（临时文件 + rename）`data/state.json`。写盘时机：
   订单事件在**发单成功之后、回 webhook 之前**，邮件事件在应用 fact 或挂进 Sam 列表
-  之后。这样进程在任意位置崩溃都不会重复发单、也不会重复应用 fact。
-  启动时恢复；`simulation.started` 重置并删除该文件。进程中途重启时，模拟器的
-  15 秒重试会落到已恢复的状态上，整周不丢单、不重发。
+  之后。这样进程在任意位置崩溃都不会重复应用 fact；发单的歧义由 WAL 与恢复处理。
+  启动时恢复；`simulation.started` 用**一次原子写覆盖**（不先删除旧文件——`clear` 与
+  `save` 之间崩溃会让磁盘上没有状态，而模拟器只对 socket 错误重投 15s）。
+- **发单 WAL 与崩溃恢复（Q4 定案）**：发单前先把 `{order_id, pharmacy, at}` 写进
+  `data/inflight.json`，`201`/`409` 之后移除。启动时若 `inflight` 里还有条目、而快照
+  的 `sent_orders` 没有它，就按 WAL 里的药房**原样重发一次**，绝不重新路由：
+  - `201`：补发成功，按已发记录；
+  - `409`：药房确认此前已接受，按已发记录、不重试；但这仍是第二次发单，模拟器会
+    记 `sent more than once` 并让 exit code 变 1（README「已知错误」必须点名）。
+  - 对 webhook 调用方仍回 200（模拟器忽略回复 body、只认状态码）。这个系统没有终端
+    用户的提交界面，「告知」= `logger.warn` + `sent_orders` 记录 + README 的「已知错误」；
+    `GET /orders/:id` 只在该订单事件被重投、正常写下 decision 之后才有内容。
+  为什么不能「先查再发」：药房 API 只有 `POST /pharmacy-orders`，没有查询接口
+  （`sim.mjs:68` 对其他方法一律 404），所以 `409` 是唯一的「此前已发」信号。
 - 发送失败（网络/5xx）先在回复 webhook 之前退避重试，仍失败则进后台重试队列，
   由最后 60 秒的 drain 兜住。
+- **没有会话时收到 `order`/`email`（Q3 定案）**：回 **500 `no_session`**，不建会话、不写
+  盘。会话的输入只有两个来源——`simulation.started` 与 `state.json`，环境变量里没有药房
+  配置，所以凭空重建只能是编造；而且空壳会话没有 `sent_orders`，重发会撞上模拟器唯一
+  不可挽回的违规（`sim.mjs:74-77` 第二次发单 → `409` + problem），比丢一个事件更糟。
+  代价：该事件会丢——模拟器只对 socket 错误重投，5xx 一律记 problem 后继续。
 
 ## 7. 审计与可解释性
 
@@ -356,6 +389,7 @@ else:
 |---|---|---|
 | "until Monday" 含不含周一？ | 不含，周一 00:00 恢复正常。 | 常规英语语义；而且取更短的限制更安全；week A 的回放到周三就结束，实际不影响。 |
 | "the rest of the week" 到哪天？ | 到下一个周一 00:00 ET（自然周的周日结束）。 | 按周一起算的自然周；week A 的回放到周三就结束，这个边界不会在回放中生效。 |
+| 日期窗口右端「本周开始 + 14 天」含不含？ | 含，窗口是闭区间 `[本周开始, 本周开始 + 14 天]`。 | 「不晚于」就是闭区间措辞；多接一天无害，拒绝一封合法邮件反而把旧信念留在原地（不安全侧）。 |
 | ops 路由指令是硬规则还是偏好？ | 偏好，从属于安全。 | 安全是第 1 目标。ops 点了一家接不了的单就直接 MANUAL，等于用病人的药惩罚 ops 的失误。 |
 | 更正是否追溯？ | 不追溯。fact 从自身时间生效，已发订单终局。 | 药房 API 明确写 `201` final。 |
 | 药房声称目录里没有的剂量（"25mg"） | 拒绝，进 Sam 列表。 | 猜剂量是安全风险；`2.5mg` 与 `25mg` 正是最要命的错法。 |
@@ -366,6 +400,15 @@ else:
 | 歇业是整天还是半天？ | 整个 ET 自然日；没有营业时间模型。 | 数据不支持更细粒度。 |
 | 两家一样快、一样便宜 | 取 id 最小。 | 三次重放要确定性。 |
 | 一封邮件含多条 fact | 全部校验通过才原子应用。 | 避免半封邮件生效。 |
+| `routing_preference` 的 `dose`/`state` 缺省是什么意思？ | **通配**：没写 `dose` 就约束该药品的所有剂量，没写 `state` 就约束所有州。 | `evt_027` 只写了 semaglutide，意图是「所有 sema 单」；读成「只匹配未指定」会让真实偏好永不命中。 |
+| 同一药品有多条并存偏好，谁优先？ | 按**特异性**（同时限定了 dose 和 state 的最具体）→ 再按 `asserted_at` 后断言者 → 再按序号；**按这个顺序取第一条其药房合格的**，不是「取一个集合再按速度排名」。 | 偏好表达的是 ops「发给谁」的意图，不能退化成只看速度。 |
+| 药房邮件没点名药房 | 默认取**发件人自己那家**（发件人身份由 contacts 决定，不是猜）。ops 必须显式写药房。 | week A 10 封里 8 封正文不提药房名；要求显式会把一半邮件推给 Sam。 |
+| `closed`/`stock_unavailable` 没写结束时间 | 按无限期生效，审计留「假设」，不进 Sam。 | 否定类事实按无限期是安全侧；拒绝会把「营业/有货」留在原地。 |
+| 未知发件人的邮件「看起来无关」 | 仍然进 Sam（身份检查先于「无关」判断）。 | §4.1 的「其他人 → 进 Sam」不能被意图分类绕过。 |
+| 模型给的 `phrase` 与模型日期冲突 | 逐字段合并；粒度不同按 ET 日期比；**日期不同才整封进 Sam**。 | `phrase` 可能被截断，越「自信覆盖」越可能把缺货读成有货。 |
+| `no_change` 类型的候选 | 不产生 fact、不改状态；整封只有它时记一条 `no_change` 审计；与其它候选混在一起时丢弃它。 | 它的语义是「没变化」，不该被当成一条断言。 |
+| 一封「谢谢」这类无关邮件要不要进 Sam？ | 发件人已知且模型判为 `unrelated` → 记 `no_change` 审计，**不进 Sam**。发件人未知则进 Sam。 | Sam 的语义是「等人决定」；把客套话塞进去会淹没真正需要人看的两封。 |
+| 订单剂量缺单位（`"7.5"`） | 不补 `mg`，直接 `MANUAL('unknown_dose:7.5')`。 | 补单位属于「单位推断」，与 §4.3 的禁止项冲突；`2.5` 补成 `25` 是要命的错法。 |
 
 ## 11. 非目标（有意不做）
 
