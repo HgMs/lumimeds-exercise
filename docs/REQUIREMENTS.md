@@ -1,12 +1,16 @@
 # Requirements & routing policy
 
 > Working spec for the LumiMeds pharmacy-desk take-home. Sources: the brief in
-> `README.md`, `sim/README.md`, the visual guide, and `sim/week-a.jsonl`.
+> `README.upstream.md`, `sim/README.md`, the visual guide, and `sim/week-a.jsonl`.
 >
 > This document is the contract the implementation is written against. Anything the
 > implementation deliberately does differently is recorded in the final `README.md`
 > under "ambiguous rules" and "known gaps". A Chinese translation lives in
 > [`REQUIREMENTS.zh-CN.md`](REQUIREMENTS.zh-CN.md).
+>
+> This file describes **what the app must do**. What the interview asks for — time
+> box, what to submit, the README questions, bonuses, scoring — is in
+> [`ASSIGNMENT.md`](ASSIGNMENT.md).
 
 ## 0. Scope
 
@@ -383,7 +387,10 @@ Traps seen and where they are handled:
 - Handling a pharmacy that goes fully offline for a week vs. a single day (the fact
   model covers it, but no special UX).
 
-## 12. Acceptance criteria
+## 12. Product acceptance criteria
+
+These are behavioural. The delivery checklist (README, repository, `core done`) lives
+in [`ASSIGNMENT.md`](ASSIGNMENT.md) §9.
 
 - [ ] `npm install && npm start` serves `POST /webhooks` on :3000.
 - [ ] `node sim/sim.mjs --target http://localhost:3000/webhooks --ping` → three
@@ -393,5 +400,3 @@ Traps seen and where they are handled:
 - [ ] `npm test` passes.
 - [ ] `npm run verify` passes all safety invariants and matches the expected fixture.
 - [ ] Restart mid-week: kill the process, restart, the week still completes.
-- [ ] `README.md` covers every question in the brief's "What to send back".
-- [ ] Commit `core done` exists once the core is green.

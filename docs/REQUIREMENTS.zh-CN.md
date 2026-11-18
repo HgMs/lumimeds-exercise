@@ -1,6 +1,6 @@
 # 需求与路由策略（中文版）
 
-> LumiMeds pharmacy-desk 面试题的工作规范。来源：`README.md` 中的题目说明、
+> LumiMeds pharmacy-desk 面试题的工作规范。来源：`README.upstream.md` 中的题目说明、
 > `sim/README.md`、可视化引导页，以及 `sim/week-a.jsonl`。
 >
 > 本文是实现所依据的契约。实现中任何有意偏离的地方，都会记录在最终 `README.md`
@@ -8,6 +8,9 @@
 >
 > 英文版 `docs/REQUIREMENTS.md` 是仓库的正式版本（给面试官看）；本文件是同一份
 > 内容的中文对照，方便评审和面试口述。
+>
+> 本文描述的是**这个 app 必须做什么**。面试题本身的要求——时间盒、交什么、
+> README 的 9 个问题、加分项、评分方式——见 [`ASSIGNMENT.md`](ASSIGNMENT.md)。
 
 ## 0. 范围
 
@@ -345,7 +348,10 @@ else:
 - 草拟回复（廉价加分项；核心和 README 完成后有余力再说）。
 - 药房整周停摆 vs 单日停摆的特殊交互（fact 模型能表达，但不做专门 UX）。
 
-## 12. 验收标准
+## 12. 产品验收标准
+
+这里只列行为。交付层面的清单（README、仓库、`core done`）在
+[`ASSIGNMENT.md`](ASSIGNMENT.md) 第 9 节。
 
 - [ ] `npm install && npm start` 在 :3000 提供 `POST /webhooks`。
 - [ ] `node sim/sim.mjs --target http://localhost:3000/webhooks --ping` → 三条
@@ -355,5 +361,3 @@ else:
 - [ ] `npm test` 通过。
 - [ ] `npm run verify` 通过全部安全不变量，且与期望 fixture 一致。
 - [ ] 周中重启：杀掉进程再启动，整周仍能完成。
-- [ ] `README.md` 覆盖题目 "What to send back" 的每一个问题。
-- [ ] 核心变绿后存在 `core done` 提交。
