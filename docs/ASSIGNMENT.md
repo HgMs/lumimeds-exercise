@@ -1,11 +1,12 @@
 # 面试题要求与交付清单
 
-> 来源：Lumimeds 的 GitHub brief（`README.md`）、可视化引导页（pharmacy-desk.buxmann.dev）
-> 和面试邮件。英文引用为原文，中文是解读。
+> 来源：Lumimeds 的 GitHub brief（`README.upstream.md`）、可视化引导页
+> （pharmacy-desk.buxmann.dev）和面试邮件。英文引用为原文，中文是解读。
 >
 > **本文只讲「题目本身和怎么交」**。产品要做成什么样，见
 > [`REQUIREMENTS.md`](REQUIREMENTS.md)；数据结构和接口形状，见
-> [`DATA-CONTRACTS.zh-CN.md`](DATA-CONTRACTS.zh-CN.md)。
+> [`DATA-CONTRACTS.md`](DATA-CONTRACTS.md)。文档分工见
+> [`README.md`](README.md)，agent 工作约定见根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 1. 时间盒
 
@@ -48,7 +49,7 @@
 | 3 | why you're confident it works | 为什么相信它能工作 | `npm test`、`npm run verify`、全周 exit 0、期望路由 fixture |
 | 4 | how you decide where an order goes, and what you do when the goals conflict | 怎么决定订单去哪、目标冲突时怎么办 | REQUIREMENTS §2/§5；ops 偏好 vs 安全的降级 |
 | 5 | what you chose not to do, and why | 主动没做什么、为什么 | REQUIREMENTS §11（非目标）、加分项的取舍 |
-| 6 | which rules you found ambiguous, and what you decided | 哪些规则模糊、怎么定的 | REQUIREMENTS §10 的 13 条取舍表 |
+| 6 | which rules you found ambiguous, and what you decided | 哪些规则模糊、怎么定的 | REQUIREMENTS §10 的 12 条取舍表 |
 | 7 | anything you know is wrong or untested | 已知的错误/未测的部分 | 停手时的状态、未覆盖的边界、模型日期解析的风险 |
 | 8 | what you'd change before running this in production | 上生产前会改什么 | 持久化、鉴权、幂等补强、可观测性、多实例 |
 | 9 | how you used AI, and one place where you didn't accept what it gave you | 怎么用 AI 的、哪一次没采纳 | 具体到「哪个决定、为什么否掉」 |
@@ -146,9 +147,11 @@
 
 | 题目要求 | 本仓库位置 |
 |---|---|
-| 可运行的 app | `src/`（待建），`npm start` |
+| 可运行的 app | `src/`（尚未创建），`npm start` |
 | 模拟器 | `sim/`（原样保留，不改） |
-| 行为规范 | `docs/REQUIREMENTS.md` / `.zh-CN.md` |
-| 数据与接口契约 | `docs/DATA-CONTRACTS.zh-CN.md` |
+| 行为规范 | `docs/REQUIREMENTS.md` |
+| 数据与接口契约 | `docs/DATA-CONTRACTS.md` |
+| 文档索引与术语 | `docs/README.md` |
+| agent 工作约定 | 根 `AGENTS.md` |
 | 提交用 README | 根 `README.md`（交付前重写） |
 | 本文档 | `docs/ASSIGNMENT.md` |
