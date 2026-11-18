@@ -1,5 +1,9 @@
 # LumiMeds take-home: run the pharmacy desk for a week
 
+> **What this file is:** the brief from the upstream repo (`Lumimeds/take-home-pharmacy-desk`),
+> kept as-is for reference. Only this note was added. Our own solution write-up belongs in
+> `README.md`, which the brief asks for in "What to send back".
+
 > **Everything in this repo is made up.** The pharmacies, people, email addresses, orders and emails
 > are fictional. They were invented for this exercise and aren't LumiMeds' real systems or data.
 > Any resemblance to a real business or person is coincidence.
