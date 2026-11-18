@@ -101,7 +101,15 @@ export function loadEnv(source: NodeJS.ProcessEnv): Result<EnvConfig, string> {
   const problems: string[] = [];
 
   const port = readInt(source, 'PORT', 3000, 0, 65_535, problems);
-  const apiKey = readString(source, 'ANTHROPIC_API_KEY', undefined, problems);
+  const llmMode = readLlmMode(source, problems);
+  // `live` 模式必须有 key（core 要求 LLM 读邮件，静默降级比启动失败更糟）；
+  // `replay` 只用于测试/离线演示，允许不带 key（fixture 回放不访问网络）。
+  const apiKey = readString(
+    source,
+    'ANTHROPIC_API_KEY',
+    llmMode === 'replay' ? '' : undefined,
+    problems,
+  );
   const model = readString(source, 'ANTHROPIC_MODEL', DEFAULT_MODEL, problems);
   const anthropicTimeoutMs = readInt(
     source,
@@ -114,7 +122,6 @@ export function loadEnv(source: NodeJS.ProcessEnv): Result<EnvConfig, string> {
   const dataDir = readString(source, 'DATA_DIR', DEFAULT_DATA_DIR, problems);
   const outDir = readString(source, 'OUT_DIR', DEFAULT_OUT_DIR, problems);
   const tz = readString(source, 'TZ', DEFAULT_TZ, problems);
-  const llmMode = readLlmMode(source, problems);
   const inflightFile = readString(source, 'INFLIGHT_FILE', DEFAULT_INFLIGHT_FILE, problems);
   const llmFixture = readString(source, 'LLM_FIXTURE', DEFAULT_LLM_FIXTURE, problems);
 

@@ -6,10 +6,10 @@
  */
 import type { ErrorCode } from '../kernel/errors.ts';
 
-/** RFC3339 带偏移的时间字符串，例如 "2026-11-09T07:05:00-05:00"。 */
+/** RFC3339 带偏移的时间字符串，例如 "2026-01-05T09:00:00-05:00"。 */
 export type Iso = string;
 
-/** 药房 id，config 里给出，例如 "TANDREL"。 */
+/** 药房 id，config 里给出，例如 "PHARM_A"。 */
 export type PharmacyId = string;
 
 /** 两位 USPS 州码，例如 "TX"。 */
@@ -21,7 +21,7 @@ export type MedicationId = string;
 /** 目录里的精确剂量，例如 "7.5mg"。 */
 export type DoseId = string;
 
-/** 订单 id，例如 "ORD-1001"。 */
+/** 订单 id，例如 "example-order"。 */
 export type OrderId = string;
 
 /** fact id，例如 "fact_0028"。 */
