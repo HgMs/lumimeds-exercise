@@ -1,0 +1,20 @@
+{
+  "name": "lumimeds-pharmacy-desk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LumiMeds pharmacy desk: webhook service that routes patient orders to pharmacies using LLM-read emails.",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "start": "node --experimental-transform-types --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-transform-types --disable-warning=ExperimentalWarning --experimental-test-isolation=none --test \"test/**/*.test.ts\"",
+    "verify": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/verify.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

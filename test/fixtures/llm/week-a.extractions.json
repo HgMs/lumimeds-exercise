@@ -1,0 +1,171 @@
+{
+  "evt_001": {
+    "intent": "stock",
+    "facts": [
+      {
+        "type": "stock_unavailable",
+        "pharmacy": null,
+        "medication": "tirzepatide",
+        "dose": "5mg",
+        "from_date": null,
+        "until_date": "2026-11-11",
+        "phrase": "until Wednesday"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_002": {
+    "intent": "coverage",
+    "facts": [
+      {
+        "type": "state_blocked",
+        "pharmacy": null,
+        "states": [
+          "Florida"
+        ],
+        "from_date": "2026-11-11",
+        "until_date": null,
+        "phrase": "from Wednesday"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_003": {
+    "intent": "routing",
+    "facts": [
+      {
+        "type": "routing_preference",
+        "pharmacy": "Ishby",
+        "medication": "tirzepatide",
+        "from_date": null,
+        "until_date": null,
+        "phrase": "immediately"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_004": {
+    "intent": "stock",
+    "facts": [
+      {
+        "type": "stock_available",
+        "pharmacy": null,
+        "medication": "tirzepatide",
+        "dose": "25mg",
+        "from_date": null,
+        "until_date": null,
+        "phrase": null
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_014": {
+    "intent": "closure",
+    "facts": [
+      {
+        "type": "closed",
+        "pharmacy": null,
+        "from_date": "2026-11-10",
+        "until_date": "2026-11-11",
+        "phrase": "tomorrow"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_017": {
+    "intent": "stock",
+    "facts": [
+      {
+        "type": "stock_available",
+        "pharmacy": null,
+        "medication": "tirzepatide",
+        "dose": "5mg",
+        "from_date": null,
+        "until_date": null,
+        "phrase": null
+      },
+      {
+        "type": "stock_unavailable",
+        "pharmacy": null,
+        "medication": "tirzepatide",
+        "dose": "7.5mg",
+        "from_date": null,
+        "until_date": "2026-11-11",
+        "phrase": "back on Wednesday"
+      }
+    ],
+    "correction": true,
+    "confidence": "high"
+  },
+  "evt_020": {
+    "intent": "capacity",
+    "facts": [
+      {
+        "type": "capacity",
+        "pharmacy": null,
+        "per_day": 2,
+        "from_date": null,
+        "until_date": "2026-11-16",
+        "phrase": "until Monday"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_022": {
+    "intent": "coverage",
+    "facts": [
+      {
+        "type": "state_blocked",
+        "pharmacy": null,
+        "states": [
+          "Texas"
+        ],
+        "from_date": null,
+        "until_date": null,
+        "phrase": "effective immediately"
+      }
+    ],
+    "correction": false,
+    "confidence": "high",
+    "notes": "Texas spelled out; no end date"
+  },
+  "evt_027": {
+    "intent": "routing",
+    "facts": [
+      {
+        "type": "routing_preference",
+        "pharmacy": "Velmora",
+        "medication": "semaglutide",
+        "dose": null,
+        "states": [],
+        "from_date": "2026-11-11",
+        "until_date": "2026-11-16",
+        "phrase": "from tomorrow ... for the rest of the week"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  },
+  "evt_040": {
+    "intent": "stock",
+    "facts": [
+      {
+        "type": "stock_unavailable",
+        "pharmacy": null,
+        "medication": "semaglutide",
+        "dose": "1mg",
+        "from_date": null,
+        "until_date": "2026-11-13",
+        "phrase": "until Friday"
+      }
+    ],
+    "correction": false,
+    "confidence": "high"
+  }
+}
