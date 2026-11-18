@@ -157,8 +157,9 @@ fact 只有通过校验（第 4.3 节）才会生效。校验不通过、或抽�
   medication: string | null,    // 例如 "tirzepatide"
   dose: string | null,          // 例如 "7.5mg"
   states: string[],             // 原样返回，后续归一化
-  effective_from: string | null,   // 原样返回时间短语，如 "Wednesday"
-  effective_until: string | null,  // 如 "Friday"
+  from_date: string | null,        // 解析后的 YYYY-MM-DD（ET），如 "2026-11-11"
+  until_date: string | null,       // 排他
+  phrase: string | null,           // 原始措辞，如 "from Wednesday"
   correction: boolean,          // "ignore my last email" / "correction to…"
   facts: Fact[],                // 0..n 个具体 fact
   confidence: "high" | "medium" | "low",
@@ -208,9 +209,9 @@ LLM 永远不为订单选药房，也不写路由代码，只把自然语言变�
 「更正」不是一条独立的新事实，它意味着之前的说法是错的。流水线：
 
 1. 找到同一主体（药房 + 类型 + 药/剂量 或 州）的旧 fact；
-2. 在 `occurred_at` 处关闭它（表示「到这一刻为止我们曾相信」）；
-3. 从 `occurred_at` 起应用更正后的事实；
-4. 两条都留在历史里，所以「10:00 时我们相信什么」仍能答出旧信念。
+2. 从 `occurred_at` 起追加更正后的 fact；求值规则是「覆盖该时刻的最后断言者胜」，
+   旧 fact 从这一刻起不再生效，但历史不被改写；
+3. 两条都留在历史里，所以「10:00 时我们相信什么」仍能答出旧信念。
 
 已经发出的订单**永不回改**，`201` 是终局。
 

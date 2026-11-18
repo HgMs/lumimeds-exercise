@@ -170,8 +170,9 @@ Output shape (conceptual):
   medication: string | null,    // e.g. "tirzepatide"
   dose: string | null,          // e.g. "7.5mg"
   states: string[],             // as written, normalised later
-  effective_from: string | null,   // date/time as written, e.g. "Wednesday"
-  effective_until: string | null,  // e.g. "Friday"
+  from_date: string | null,        // resolved YYYY-MM-DD in ET, e.g. "2026-11-11"
+  until_date: string | null,       // exclusive
+  phrase: string | null,           // original wording, e.g. "from Wednesday"
   correction: boolean,          // "ignore my last email" / "correction to…"
   facts: Fact[],                // 0..n concrete facts
   confidence: "high" | "medium" | "low",
@@ -228,9 +229,10 @@ means the earlier statement was wrong. The pipeline:
 
 1. finds the earlier fact with the same subject (pharmacy + kind + medication/dose
    or state);
-2. closes that fact at `occurred_at` (it was believed until then);
-3. applies the corrected fact from `occurred_at`;
-4. keeps both in history, so "what did we believe at 10:00" still answers with the
+2. appends the corrected fact effective at `occurred_at`; because evaluation is
+   "last asserted covering fact wins", the old one stops applying from then on
+   without rewriting history;
+3. keeps both in history, so "what did we believe at 10:00" still answers with the
    old belief.
 
 Orders already sent are **never** revisited. `201` is final.
