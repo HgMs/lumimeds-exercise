@@ -312,24 +312,42 @@ export class HandleEmailUseCase {
     // 扇出（一个候选 → 多条 fact，如多州）时 validator 为每条 draft 重复同一份 sources；
     // 审计行只有一份 `sources`，取第一条非空即可（它们来自同一个候选的同一段时间）。
     const sources = outcome.sources.find((entry) => entry !== undefined);
-    const record: FactAuditRecord = this.baseAuditRecord(evt, at, sender, {
-      outcome: 'applied',
-      facts: facts.map((fact) => ({
+    // 审计行要能解释「改的是哪个剂量/州/药品」：routing_preference 也必须带
+    // medication（可选的 dose/state 只在模型真的给了时输出），否则 evt_027 这类
+    // 只约束药品的偏好会丢失关键字段（DATA-CONTRACTS §3.7 的可选附加字段本来允许）。
+    const auditFacts = facts.map((fact) => {
+      const common = {
         id: fact.id,
         type: fact.type,
         pharmacy: fact.pharmacy,
-        ...(fact.type === 'stock_available' || fact.type === 'stock_unavailable'
-          ? { medication: fact.medication, dose: fact.dose }
-          : {}),
-        ...(fact.type === 'state_blocked' || fact.type === 'state_allowed'
-          ? { state: fact.state }
-          : {}),
-        ...(fact.type === 'capacity' ? { perDay: fact.perDay } : {}),
         interval: {
           from: calendar.iso(fact.interval.from),
           until: fact.interval.until === null ? null : calendar.iso(fact.interval.until),
         },
-      })),
+      };
+      switch (fact.type) {
+        case 'stock_available':
+        case 'stock_unavailable':
+          return { ...common, medication: fact.medication, dose: fact.dose };
+        case 'state_blocked':
+        case 'state_allowed':
+          return { ...common, state: fact.state };
+        case 'capacity':
+          return { ...common, perDay: fact.perDay };
+        case 'routing_preference':
+          return {
+            ...common,
+            medication: fact.medication,
+            ...(fact.dose === undefined ? {} : { dose: fact.dose }),
+            ...(fact.state === undefined ? {} : { state: fact.state }),
+          };
+        default:
+          return common;
+      }
+    });
+    const record: FactAuditRecord = this.baseAuditRecord(evt, at, sender, {
+      outcome: 'applied',
+      facts: auditFacts,
     });
     if (sources !== undefined && (sources.from !== undefined || sources.until !== undefined)) {
       record.sources = { ...sources };

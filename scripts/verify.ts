@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `scripts/verify.ts`：**独立**安全求值器（`ARCHITECTURE.md` §12.5、`REQUIREMENTS.md` §8、
- * §7 INV-5、§10 时间模型、`DATA-CONTRACTS.md` §3.7）。
+ * §7 INV-5、§10 时间模型、`WALKTHROUGHS.md` T13）。
  *
  * 它做的是**差分测试**：不复用 `src/domain`、`src/application` 的任何代码，自己重算
  * 「在订单的 sim_time 时刻，把订单发给某家药房安不安全」，再和应用的审计产物对账。
@@ -11,18 +11,21 @@
  *
  * | 文件 | 默认 | 覆盖 | 用途 |
  * |---|---|---|---|
- * | week 文件 | `sim/week-a.jsonl` | `--week` / `WEEK_FILE` | config（基础事实）+ 订单事件（sim_time/州/药/剂量） |
+ * | week 文件 | `sim/week-a.jsonl` | `--week` / `WEEK_FILE` | config（基础事实）+ 邮件事件（事实来源）+ 订单事件（sim_time/州/药/剂量） |
  * | 决策审计 | `out/decisions.jsonl` | `--decisions` / `DECISIONS_FILE` | 每单的 chosen/basis/candidates/偏好/override |
  * | 发单日志 | `out/run-log.jsonl` | `--run-log` / `RUN_LOG_FILE` | 真实发单（模拟器写的唯一评分产物） |
- * | 事实审计 | `out/facts.jsonl` | `--facts` / `FACTS_FILE` | 邮件生效的事实（绝对 `from`/`until`，见下） |
  *
- * **为什么读 `out/facts.jsonl`**：`ARCHITECTURE.md` §12.5 说「不读 facts.jsonl 重建信念」，
- * 理由是它按契约只有邮件行、基础事实不在里面（§5.4）。本脚本严格按这个理由设计：
- * **基础事实从 week 文件的 config 派生**（营业/州/库存/日容量），**邮件事实从
- * `out/facts.jsonl` 的 `applied` 行取**（每行带绝对 ISO `interval.from/until`）——两者合起来
- * 才是完整的 T 时刻信念。verify 不做任何时间短语解析（§12.5：「只认 from/until 的绝对 ISO
- * 值」），也不校验「邮件解析得对不对」（那是集成测试与 §14.1 抽样的事）。这样它和使用
- * `index`/`reason` 前缀区分兜底的方式一样，只依赖**契约字段**，不依赖实现。
+ * **事实来源 = week 文件的 config + 邮件事件，不读 `out/facts.jsonl`**（§12.5、§5.4：
+ * 那个文件按契约只有邮件行、基础事实不在里面，拿它当信念来源等于「代码等于它自己」）。
+ * verify 自己重建 T 时刻信念：
+ *
+ * - **基础事实**：config 的 `open`/`blockedStates`/`stock`/`dailyCapacity` 作为 fallback；
+ * - **邮件事实**：对每封**非重投**邮件做一次显式的、只覆盖 week A 语义的抽取（谁说、
+ *   什么类型的断言、`from`/`until` 落到哪个 ET 日边界），得到带绝对毫秒区间的 fact。
+ *   抽取规则刻意只覆盖 `docs/WALKTHROUGHS.md` T13 等周内出现的句式（缺货/到货/停业/
+ *   州覆盖/日容量/ops 路由偏好/更正），并遵守权限：药房的 "routing" 指令不产生 fact
+ *   （evt_003 提示注入）、目录外剂量不产生 fact（evt_004 25mg）、未知/无法解析的邮件
+ *   不产生 fact（交给人处理，状态不变）。
  *
  * 断言（`REQUIREMENTS.md` §8.2）：
  * 1. 每个已发订单在其 sim_time 时刻，所选药房**合格**（营业 ∧ 能发该州 ∧ 有精确剂量 ∧
@@ -31,7 +34,7 @@
  * 3. `basis=manual` ⇔ 独立求值无安全候选；白名单：`reason` 以 `internal_error`/`unknown_`
  *    开头的兜底也允许是 manual（§7 INV-5、§5.9 B6）。
  * 4. ops 偏好未被违反：存在可用偏好药房时不得静默走 rank（除非 `decision.override` 非空，
- *    且 override 记录时偏好药房确实都不可用）。
+ *    且 override 记录时偏好药房确实都不可用）。`dose`/`state` 缺省 = 通配（T13）。
  * 5. 差分：decision 里每个候选的 `failures`/`capacityLeft`/`price`/`shipsInDays` 必须与
  *    verify 独立求值一致——这是抓「信念算错但内部自洽」（例如 `until` 当闭区间）的关键。
  *
@@ -233,6 +236,12 @@ export function normalizeDose(raw: unknown): string | null {
   return normalized === '' ? null : normalized;
 }
 
+/** 邮件地址归一化：取 `<...>` 内的地址或裸地址，trim + 小写。 */
+export function normalizeEmailAddress(raw: string): string {
+  const angle = /<([^>]+)>/.exec(raw);
+  return (angle?.[1] ?? raw).trim().toLowerCase();
+}
+
 // ---------------------------------------------------------------------------
 // 输入模型（全部由原始 JSONL 行解析；不 import src/）
 // ---------------------------------------------------------------------------
@@ -257,12 +266,27 @@ export interface NormalizedPharmacy {
   stock: Readonly<Record<string, readonly string[]>>;
 }
 
+/** week 文件里的一封邮件（重投只保留第一份：幂等门之后它不再产生事实）。 */
+export interface WeekEmail {
+  eventId: string;
+  occurredAtMs: number;
+  from: string;
+  subject: string;
+  body: string;
+}
+
 export interface WeekModel {
   startedAtMs: number;
   eventCount: number;
   emailEventCount: number;
   pharmacies: NormalizedPharmacy[];
   catalogue: Readonly<Record<string, readonly string[]>>;
+  /** ops 地址集合（小写）：只有它们可以下达 routing_preference。 */
+  opsAddresses: ReadonlySet<string>;
+  /** 药房联系人地址（小写）→ 药房 id：决定「谁代表哪家药房」。 */
+  pharmacyContacts: ReadonlyMap<string, string>;
+  /** 非重投邮件（事实来源）。 */
+  emailEvents: WeekEmail[];
   /** order_id → 第一个订单事件的业务时刻与归一化订单（重复投递不算新订单）。 */
   orderEvents: Map<string, { eventId: string; occurredAtMs: number; order: NormalizedOrder }>;
   /** 订单首次出现的先后顺序（报告按此排列）。 */
@@ -311,17 +335,6 @@ export type FactType =
   | 'capacity'
   | 'routing_preference';
 
-const FACT_TYPES = new Set<string>([
-  'stock_available',
-  'stock_unavailable',
-  'state_blocked',
-  'state_allowed',
-  'closed',
-  'reopened',
-  'capacity',
-  'routing_preference',
-]);
-
 export interface Fact {
   id: string;
   /** 全局单调序号（从 `fact_0028` 解析；同 `assertedAt` 时的最终平局键）。 */
@@ -342,7 +355,6 @@ export interface RawVerifyInput {
   weekRows: unknown[];
   decisionRows: unknown[];
   runLogRows: unknown[];
-  factRows: unknown[];
 }
 
 export interface VerifyModel {
@@ -433,6 +445,13 @@ export function parseWeek(rows: readonly unknown[]): WeekModel {
     throw new InputError('config.pharmacies 缺失或为空');
   }
 
+  const opsAddresses = new Set<string>();
+  for (const rawAddress of asStringArray(rawConfig.lumimedsOps) ?? []) {
+    const address = normalizeEmailAddress(rawAddress);
+    if (address !== '') opsAddresses.add(address);
+  }
+  const pharmacyContacts = new Map<string, string>();
+
   const pharmacies: NormalizedPharmacy[] = [];
   const seenIds = new Set<string>();
   for (const rawPharmacy of rawConfig.pharmacies) {
@@ -488,6 +507,11 @@ export function parseWeek(rows: readonly unknown[]): WeekModel {
       throw new InputError(`config.pharmacies.${id}.dailyCapacity 不是非负整数`);
     }
 
+    for (const rawContact of asStringArray(rawPharmacy.contacts) ?? []) {
+      const address = normalizeEmailAddress(rawContact);
+      if (address !== '') pharmacyContacts.set(address, id);
+    }
+
     pharmacies.push({
       id,
       name: typeof rawPharmacy.name === 'string' ? rawPharmacy.name : id,
@@ -505,6 +529,8 @@ export function parseWeek(rows: readonly unknown[]): WeekModel {
   const catalogueKeys = Object.keys(catalogue);
   const orderEvents = new Map<string, { eventId: string; occurredAtMs: number; order: NormalizedOrder }>();
   const orderSequence: string[] = [];
+  const emailEvents: WeekEmail[] = [];
+  const seenEmailIds = new Set<string>();
   let eventCount = 0;
   let emailEventCount = 0;
 
@@ -513,6 +539,25 @@ export function parseWeek(rows: readonly unknown[]): WeekModel {
     eventCount += 1;
     if (row.type === 'email') {
       emailEventCount += 1;
+      const eventId = typeof row.event_id === 'string' ? row.event_id : null;
+      const occurredAtMs = parseIso(row.occurred_at);
+      if (eventId === null || occurredAtMs === null) {
+        throw new InputError(`week 文件第 ${index + 1} 行：email 事件缺少可解析的 event_id/occurred_at`);
+      }
+      // 重投（同一 event_id 再来一次）不是新事实来源：幂等门之后它什么都不改。
+      if (seenEmailIds.has(eventId)) return;
+      seenEmailIds.add(eventId);
+      const envelope = isRecord(row.email) ? row.email : null;
+      if (envelope === null) {
+        throw new InputError(`week 文件第 ${index + 1} 行：email 事件缺少 email 对象`);
+      }
+      emailEvents.push({
+        eventId,
+        occurredAtMs,
+        from: typeof envelope.from === 'string' ? envelope.from : '',
+        subject: typeof envelope.subject === 'string' ? envelope.subject : '',
+        body: typeof envelope.body === 'string' ? envelope.body : '',
+      });
       return;
     }
     if (row.type !== 'order') return;
@@ -554,13 +599,16 @@ export function parseWeek(rows: readonly unknown[]): WeekModel {
     emailEventCount,
     pharmacies,
     catalogue,
+    opsAddresses,
+    pharmacyContacts,
+    emailEvents,
     orderEvents,
     orderSequence,
   };
 }
 
 // ---------------------------------------------------------------------------
-// 解析：decisions / run-log / facts
+// 解析：decisions / run-log
 // ---------------------------------------------------------------------------
 
 function parseNormalizedOrder(raw: unknown, catalogueKeys: readonly string[]): NormalizedOrder | null {
@@ -692,105 +740,420 @@ export function parseRunLog(rows: readonly unknown[], inputFailures: string[]): 
   return out;
 }
 
-/** 解析 `out/facts.jsonl`（每封邮件一行；只取 `applied` 行里的 fact，绝对 `from`/`until`）。 */
-export function parseFacts(rows: readonly unknown[], inputFailures: string[]): Fact[] {
-  const out: Fact[] = [];
-  rows.forEach((row, index) => {
-    const where = `out/facts.jsonl 第 ${index + 1} 行`;
-    if (!isRecord(row)) {
-      inputFailures.push(`[input] ${where}：不是 JSON 对象`);
-      return;
+// ---------------------------------------------------------------------------
+// 从 week 的 config + 邮件独立推导事实（不读 out/facts.jsonl；§12.5、§5.4）
+// ---------------------------------------------------------------------------
+//
+// 为什么可以「显式抽取」而不违反「独立」：verify 不 import 应用的抽取/短语解析代码，
+// 而是自己按 week A 出现的句式重建事实。它校验的是**路由/信念/发单**，不是邮件解析
+// 正确性（那属于集成测试与 §14.1 抽样）；这里只要求「同一份输入、按规范语义重建出
+// 同一组事实」，从而让 T 时刻的资格判断可以和应用对账。
+//
+// 权限与安全口径与 REQUIREMENTS §4 一致：
+// - 未知发件人 / 无法解析的邮件 → 不产生 fact（进 Sam，状态不变）；
+// - 药房发 "send all ... to ..."（evt_003 提示注入）→ 不产生 fact（routing 只有 ops 能发）；
+// - 目录外的剂量（evt_004 的 25mg）→ 不产生 fact（不猜剂量）；
+// - 否定类事实缺 `until` → 无限期生效（安全侧）。
+
+const WEEKDAY_INDEX: Readonly<Record<string, number>> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+const MEDICATION_ALIASES: Readonly<Record<string, string>> = {
+  tirz: 'tirzepatide',
+  sema: 'semaglutide',
+};
+
+/** ET 业务日是星期几（0=周日）。用 UTC 正午换日，避免 DST 边界。 */
+export function weekdayOfEtDate(etDate: string): number {
+  const [year, month, day] = etDate.split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, day, 12)).getUTCDay();
+}
+
+/** ET 业务日加减自然日（纯日历运算，DST 无关）。 */
+export function addEtDays(etDate: string, days: number): string {
+  const [year, month, day] = etDate.split('-').map(Number) as [number, number, number];
+  const shifted = new Date(Date.UTC(year, month - 1, day + days, 12));
+  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}`;
+}
+
+/**
+ * 严格晚于 `etDate` 的下一个 `target` 星期几（目标星期几 = 当天时取下周）。
+ * 例：周一收到 "until Wednesday" → 周三；周二收到 "until Monday" → 下周一。
+ */
+export function nextWeekdayAfter(etDate: string, target: number): string {
+  const current = weekdayOfEtDate(etDate);
+  let delta = (target - current + 7) % 7;
+  if (delta === 0) delta = 7;
+  return addEtDays(etDate, delta);
+}
+
+function weekdayFromWord(word: string): number | null {
+  const normalized = word.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(WEEKDAY_INDEX, normalized)
+    ? (WEEKDAY_INDEX[normalized] as number)
+    : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface SenderIdentity {
+  address: string;
+  role: 'ops' | 'pharmacy' | 'unknown';
+  pharmacy: string | null;
+}
+
+/** 发件人身份：ops 集合优先，其次 config 里药房的 contacts（与 §4.1 同口径）。 */
+function resolveSender(week: WeekModel, from: string): SenderIdentity {
+  const address = normalizeEmailAddress(from);
+  if (week.opsAddresses.has(address)) return { address, role: 'ops', pharmacy: null };
+  const pharmacy = week.pharmacyContacts.get(address);
+  if (pharmacy !== undefined) return { address, role: 'pharmacy', pharmacy };
+  return { address, role: 'unknown', pharmacy: null };
+}
+
+/** 从正文找药品：目录键 + `tirz`/`sema` 别名（取最早出现的整词）。 */
+function matchMedicationIn(text: string, week: WeekModel): string | null {
+  const tokens: Array<{ token: string; medication: string }> = [];
+  for (const medication of Object.keys(week.catalogue)) tokens.push({ token: medication, medication });
+  for (const [alias, medication] of Object.entries(MEDICATION_ALIASES)) {
+    if (week.catalogue[medication] !== undefined) tokens.push({ token: alias, medication });
+  }
+  let best: { index: number; medication: string } | null = null;
+  for (const { token, medication } of tokens) {
+    const match = new RegExp(`\\b${escapeRegExp(token)}\\b`, 'i').exec(text);
+    if (match !== null && (best === null || match.index < best.index)) {
+      best = { index: match.index, medication };
     }
-    if (row.outcome !== 'applied') return; // rejected / no_change 不产生 fact
-    const eventId = typeof row.event_id === 'string' ? row.event_id : null;
-    const assertedAtMs = parseIso(row.at);
-    if (eventId === null || assertedAtMs === null) {
-      inputFailures.push(`[input] ${where}：applied 行缺 event_id/at（DATA-CONTRACTS §3.7）`);
-      return;
+  }
+  return best?.medication ?? null;
+}
+
+/** 从正文找药房（id / 全名 / 名字首词，整词、大小写不敏感；不做模糊匹配）。 */
+function matchPharmacyIn(text: string, week: WeekModel): string | null {
+  let best: { index: number; pharmacy: string } | null = null;
+  for (const pharmacy of week.pharmacies) {
+    const names = [pharmacy.id, pharmacy.name, pharmacy.name.split(/\s+/)[0] ?? pharmacy.id];
+    for (const name of names) {
+      if (name === '') continue;
+      const match = new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').exec(text);
+      if (match !== null && (best === null || match.index < best.index)) {
+        best = { index: match.index, pharmacy: pharmacy.id };
+      }
     }
-    if (!Array.isArray(row.facts)) {
-      inputFailures.push(`[input] ${where}：applied 行缺 facts 数组`);
-      return;
+  }
+  return best?.pharmacy ?? null;
+}
+
+/** 从正文找州（先全名，再大写两位码）。返回 USPS 码。 */
+function matchStateIn(text: string): string | null {
+  // 全名可能包含空格（"new york"），按长度降序避免短名先命中。
+  const names = Object.keys(STATE_NAMES).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    if (new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(text)) {
+      return STATE_NAMES[name] as string;
     }
-    row.facts.forEach((rawFact, factIndex) => {
-      const factWhere = `${where} 的 facts[${factIndex}]`;
-      if (!isRecord(rawFact)) {
-        inputFailures.push(`[input] ${factWhere}：不是 JSON 对象`);
-        return;
-      }
-      const id = typeof rawFact.id === 'string' ? rawFact.id : null;
-      const type = typeof rawFact.type === 'string' ? rawFact.type : null;
-      const pharmacy = typeof rawFact.pharmacy === 'string' ? rawFact.pharmacy : null;
-      if (id === null || type === null || pharmacy === null) {
-        inputFailures.push(`[input] ${factWhere}：缺 id/type/pharmacy`);
-        return;
-      }
-      const seqMatch = /^fact_(\d+)$/.exec(id);
-      if (seqMatch === null) {
-        inputFailures.push(`[input] ${factWhere}：fact id '${id}' 不是 fact_NNNN 形式（DATA-CONTRACTS §3.1）`);
-        return;
-      }
-      if (!FACT_TYPES.has(type)) {
-        inputFailures.push(`[input] ${factWhere}：未知 fact 类型 '${type}'`);
-        return;
-      }
-      if (!isRecord(rawFact.interval)) {
-        inputFailures.push(`[input] ${factWhere}：缺 interval`);
-        return;
-      }
-      const fromMs = parseIso(rawFact.interval.from);
-      const untilRaw = rawFact.interval.until;
-      const untilMs = untilRaw === null || untilRaw === undefined ? null : parseIso(untilRaw);
-      if (fromMs === null || (untilRaw !== null && untilRaw !== undefined && untilMs === null)) {
-        inputFailures.push(`[input] ${factWhere}：interval.from/until 不是合法 ISO 时间`);
-        return;
-      }
-      if (untilMs !== null && untilMs <= fromMs) {
-        inputFailures.push(`[input] ${factWhere}：interval.until(${String(untilRaw)}) 不晚于 from`);
-        return;
-      }
-      const fact: Fact = {
-        id,
-        seq: Number(seqMatch[1]),
-        eventId,
-        assertedAtMs,
-        type: type as FactType,
-        pharmacy,
-        fromMs,
-        untilMs,
-      };
-      if (rawFact.medication !== undefined && rawFact.medication !== null) {
-        if (typeof rawFact.medication !== 'string') {
-          inputFailures.push(`[input] ${factWhere}：medication 不是字符串`);
-          return;
-        }
-        fact.medication = rawFact.medication;
-      }
-      if (rawFact.dose !== undefined && rawFact.dose !== null) {
-        if (typeof rawFact.dose !== 'string') {
-          inputFailures.push(`[input] ${factWhere}：dose 不是字符串`);
-          return;
-        }
-        fact.dose = rawFact.dose;
-      }
-      if (rawFact.state !== undefined && rawFact.state !== null) {
-        if (typeof rawFact.state !== 'string') {
-          inputFailures.push(`[input] ${factWhere}：state 不是字符串`);
-          return;
-        }
-        fact.state = rawFact.state;
-      }
-      if (rawFact.perDay !== undefined && rawFact.perDay !== null) {
-        if (typeof rawFact.perDay !== 'number' || !Number.isFinite(rawFact.perDay)) {
-          inputFailures.push(`[input] ${factWhere}：perDay 不是数字`);
-          return;
-        }
-        fact.perDay = rawFact.perDay;
-      }
-      out.push(fact);
-    });
+  }
+  const codeMatch = /\b([A-Z]{2})\b/.exec(text);
+  if (codeMatch !== null && STATE_CODES.has(codeMatch[1]!)) return codeMatch[1]!;
+  return null;
+}
+
+interface DoseMention {
+  /** 归一化剂量，例如 `7.5mg`。 */
+  dose: string;
+  index: number;
+}
+
+function matchDosesIn(text: string): DoseMention[] {
+  const mentions: DoseMention[] = [];
+  const pattern = /(\d+(?:\.\d+)?)\s?mg\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const dose = normalizeDose(`${match[1]}mg`);
+    if (dose !== null) mentions.push({ dose, index: match.index });
+  }
+  return mentions;
+}
+
+/** `until <weekday>` / `rest of the week` / `back on <weekday>` → 毫秒；都没有 → null。 */
+function parseUntilMs(body: string, atDate: string): number | null {
+  const until = /until\s+([a-z]+)/.exec(body);
+  if (until !== null) {
+    const weekday = weekdayFromWord(until[1]!);
+    if (weekday !== null) return startOfDayMs(nextWeekdayAfter(atDate, weekday));
+  }
+  if (/rest of the week/.test(body)) {
+    return startOfDayMs(nextWeekdayAfter(atDate, 1)); // 下周一 00:00
+  }
+  const back = /back on\s+([a-z]+)/.exec(body);
+  if (back !== null) {
+    const weekday = weekdayFromWord(back[1]!);
+    if (weekday !== null) return startOfDayMs(nextWeekdayAfter(atDate, weekday));
+  }
+  return null;
+}
+
+/** `from tomorrow` / `from <weekday>` / `immediately` → 毫秒；默认 = 邮件时间（否定类从收到起生效）。 */
+function parseFromMs(body: string, atDate: string, atMs: number): number {
+  const from = /from\s+(?:the\s+)?([a-z]+)/.exec(body);
+  if (from !== null) {
+    const word = from[1]!;
+    if (word === 'tomorrow') return startOfDayMs(addEtDays(atDate, 1));
+    if (word === 'today' || word === 'now') return atMs;
+    const weekday = weekdayFromWord(word);
+    if (weekday !== null) return startOfDayMs(nextWeekdayAfter(atDate, weekday));
+  }
+  return atMs;
+}
+
+/** 一条邮件事实草稿（还没有 id/seq）。 */
+export interface FactDraft {
+  eventId: string;
+  assertedAtMs: number;
+  type: FactType;
+  pharmacy: string;
+  medication?: string;
+  dose?: string;
+  state?: string;
+  perDay?: number;
+  fromMs: number;
+  untilMs: number | null;
+}
+
+/**
+ * 更正邮件（`evt_017` 句式）：一条恢复 + 一条缺货。
+ *
+ * 正文可能不点名药品（"it's the 7.5mg we're out of, not the 5mg"）——此时按「能覆盖正文
+ * 提及的全部剂量」的唯一药品反推（week A 里只有 tirzepatide 同时有 5mg 与 7.5mg）。
+ */
+function extractCorrectionFacts(
+  email: WeekEmail,
+  week: WeekModel,
+  body: string,
+  atDate: string,
+  pharmacy: string,
+): FactDraft[] {
+  const doses = matchDosesIn(body);
+  if (doses.length === 0) return [];
+  let medication = matchMedicationIn(body, week);
+  if (medication === null) {
+    const distinct = [...new Set(doses.map((mention) => mention.dose))];
+    const candidates = Object.keys(week.catalogue).filter((candidate) =>
+      distinct.every((dose) => (week.catalogue[candidate] ?? []).includes(dose)),
+    );
+    if (candidates.length !== 1) return [];
+    medication = candidates[0]!;
+  }
+  const catalogueDoses = week.catalogue[medication] ?? [];
+  const valid = doses.filter((mention, index) =>
+    catalogueDoses.includes(mention.dose) && doses.findIndex((other) => other.dose === mention.dose) === index,
+  );
+  if (valid.length === 0) return [];
+
+  const facts: FactDraft[] = [];
+  const untilMs = parseUntilMs(body, atDate);
+  const base = (): Pick<FactDraft, 'eventId' | 'assertedAtMs' | 'pharmacy' | 'medication'> => ({
+    eventId: email.eventId,
+    assertedAtMs: email.occurredAtMs,
+    pharmacy,
+    medication,
   });
-  return out;
+
+  // 恢复：`not the X`（"不是 X，X 没问题"）或 `X is fine/ok/available`。
+  for (const mention of valid) {
+    const token = escapeRegExp(mention.dose);
+    const available =
+      new RegExp(`not\\s+the\\s+${token}\\b`, 'i').test(body) ||
+      new RegExp(`\\b${token}\\s+is\\s+(?:fine|ok|available)`, 'i').test(body);
+    if (available) {
+      facts.push({ ...base(), type: 'stock_available', dose: mention.dose, fromMs: email.occurredAtMs, untilMs: null });
+    }
+  }
+
+  // 缺货：`<dose> we're out of` / `out of ... <dose>`。
+  const outOf = /(\d+(?:\.\d+)?)\s?mg\s+we(?:'re| are)\s+out of/i.exec(body) ??
+    /out of\s+(?:the\s+)?(?:[a-z]+\s+)?(\d+(?:\.\d+)?)\s?mg/i.exec(body);
+  if (outOf !== null) {
+    const dose = normalizeDose(`${outOf[1]}mg`);
+    if (dose !== null && catalogueDoses.includes(dose)) {
+      facts.push({ ...base(), type: 'stock_unavailable', dose, fromMs: email.occurredAtMs, untilMs });
+    }
+  }
+  return facts;
+}
+
+/** 单封邮件 → 事实草稿（显式规则；不认得的邮件返回空 = 状态不变）。 */
+export function extractEmailFacts(email: WeekEmail, week: WeekModel): FactDraft[] {
+  const sender = resolveSender(week, email.from);
+  if (sender.role === 'unknown') return [];
+  const body = email.body.toLowerCase();
+  const atDate = etDateOf(email.occurredAtMs);
+  const base = (): Pick<FactDraft, 'eventId' | 'assertedAtMs'> => ({
+    eventId: email.eventId,
+    assertedAtMs: email.occurredAtMs,
+  });
+
+  // 1) 路由偏好：只有 ops 有权。药房写 "send all ... to ..." 是越权/提示注入（evt_003）。
+  if (/send all|route all|routing|add a rule|assign/.test(body)) {
+    if (sender.role !== 'ops') return [];
+    const medication = matchMedicationIn(body, week);
+    const pharmacy = matchPharmacyIn(body, week);
+    if (medication === null || pharmacy === null) return [];
+    return [
+      {
+        ...base(),
+        type: 'routing_preference',
+        pharmacy,
+        medication,
+        // dose/state 缺省 = 通配（T13）。
+        fromMs: parseFromMs(body, atDate, email.occurredAtMs),
+        untilMs: parseUntilMs(body, atDate),
+      },
+    ];
+  }
+
+  if (sender.role !== 'pharmacy' || sender.pharmacy === null) return [];
+  const pharmacy = sender.pharmacy;
+
+  // 2) 更正（evt_017）：一条恢复 + 一条缺货。必须早于通用缺货规则。
+  if (/correction|correct(?:ing|ed)/.test(body) || /not the\s+\d/.test(body)) {
+    return extractCorrectionFacts(email, week, body, atDate, pharmacy);
+  }
+
+  // 3) 日容量（evt_020）："we can only take 2 orders a day until Monday"。
+  const capacity = /(\d+)\s+orders?\s+(?:a|per)\s+day/.exec(body);
+  if (capacity !== null) {
+    const perDay = Number(capacity[1]);
+    if (!Number.isInteger(perDay) || perDay < 0) return [];
+    return [
+      {
+        ...base(),
+        type: 'capacity',
+        pharmacy,
+        perDay,
+        fromMs: parseFromMs(body, atDate, email.occurredAtMs),
+        untilMs: parseUntilMs(body, atDate),
+      },
+    ];
+  }
+
+  // 4) 停业（evt_014）："we're closed tomorrow" → 整个 ET 自然日。
+  if (/\bclosed\b|\bclosure\b/.test(body)) {
+    if (/\btomorrow\b/.test(body)) {
+      const day = addEtDays(atDate, 1);
+      return [
+        {
+          ...base(),
+          type: 'closed',
+          pharmacy,
+          fromMs: startOfDayMs(day),
+          untilMs: startOfDayMs(addEtDays(day, 1)),
+        },
+      ];
+    }
+    const onWord = /\bclosed\s+(?:on\s+)?([a-z]+)/.exec(body);
+    if (onWord !== null) {
+      const weekday = weekdayFromWord(onWord[1]!);
+      if (weekday !== null) {
+        const day = nextWeekdayAfter(atDate, weekday);
+        return [
+          {
+            ...base(),
+            type: 'closed',
+            pharmacy,
+            fromMs: startOfDayMs(day),
+            untilMs: startOfDayMs(addEtDays(day, 1)),
+          },
+        ];
+      }
+    }
+    // 没给结束时间：无限期（安全侧，REQUIREMENTS §10）。
+    return [{ ...base(), type: 'closed', pharmacy, fromMs: email.occurredAtMs, untilMs: null }];
+  }
+
+  // 5) 州覆盖（evt_002 "from Wednesday ... no longer ship to Florida"；evt_022 "can't do Texas"）。
+  const state = matchStateIn(email.body);
+  const mentionsCoverage = /ship|deliver|coverage|customers?|block|do(?:n't| not)|can(?:'|no)t|state/.test(body);
+  if (state !== null && mentionsCoverage) {
+    return [
+      {
+        ...base(),
+        type: 'state_blocked',
+        pharmacy,
+        state,
+        fromMs: parseFromMs(body, atDate, email.occurredAtMs),
+        untilMs: parseUntilMs(body, atDate),
+      },
+    ];
+  }
+
+  // 6) 缺货（evt_001 / evt_040）："we're out of tirzepatide 5mg until Wednesday"。
+  const outOf = /(?:out of|no longer (?:have|stock)|running out of)\s+(?:the\s+)?([a-z]+)\s+(\d+(?:\.\d+)?)\s?mg/i.exec(body);
+  if (outOf !== null) {
+    const medication = normalizeMedication(outOf[1]!, Object.keys(week.catalogue));
+    const dose = normalizeDose(`${outOf[2]}mg`);
+    if (medication === null || dose === null) return [];
+    if (!(week.catalogue[medication] ?? []).includes(dose)) return []; // 目录外剂量：不猜（evt_004）
+    return [
+      {
+        ...base(),
+        type: 'stock_unavailable',
+        pharmacy,
+        medication,
+        dose,
+        fromMs: email.occurredAtMs,
+        untilMs: parseUntilMs(body, atDate),
+      },
+    ];
+  }
+
+  // 7) 到货（evt_004 句式）："restocked tirz 25mg"——目录外剂量直接丢弃。
+  const restock = /(?:restock(?:ed)?|back in stock|available again)\s+(?:of\s+)?(?:the\s+)?([a-z]+)\s+(\d+(?:\.\d+)?)\s?mg/i.exec(body);
+  if (restock !== null) {
+    const medication = normalizeMedication(restock[1]!, Object.keys(week.catalogue));
+    const dose = normalizeDose(`${restock[2]}mg`);
+    if (medication === null || dose === null) return [];
+    if (!(week.catalogue[medication] ?? []).includes(dose)) return [];
+    return [
+      {
+        ...base(),
+        type: 'stock_available',
+        pharmacy,
+        medication,
+        dose,
+        fromMs: email.occurredAtMs,
+        untilMs: parseUntilMs(body, atDate),
+      },
+    ];
+  }
+
+  // 不认得的邮件 / 客套话：不改状态（进 Sam 或 no_change，由应用决定）。
+  return [];
+}
+
+/** 从 week 的 config + 邮件事件重建整周事实（按邮件文件顺序分配 seq，平局键确定）。 */
+export function deriveFactsFromWeek(week: WeekModel): Fact[] {
+  const drafts: FactDraft[] = [];
+  for (const email of week.emailEvents) {
+    for (const draft of extractEmailFacts(email, week)) {
+      if (draft.untilMs !== null && draft.untilMs <= draft.fromMs) continue; // 空/负区间：丢弃
+      drafts.push(draft);
+    }
+  }
+  return drafts.map((draft, index) => ({
+    ...draft,
+    id: `fact_${String(index + 1).padStart(4, '0')}`,
+    seq: index + 1,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,8 +1828,8 @@ function renderHeader(model: VerifyModel, summary: Summary): string[] {
   const lastAt = last === undefined ? week.startedAtMs : (week.orderEvents.get(last)?.occurredAtMs ?? week.startedAtMs);
   return [
     `verify: 独立安全求值（不 import src/；ET=${ET_ZONE}）`,
-    `  输入：week 事件 ${week.eventCount} 条（email ${week.emailEventCount}）；` +
-      `applied 邮件事实 ${summary.appliedFactCount} 条 / ${summary.appliedEmailCount} 封邮件（out/facts.jsonl）`,
+    `  输入：week 事件 ${week.eventCount} 条（email ${week.emailEventCount} 条，非重投 ${week.emailEvents.length} 封）；` +
+      `从 config + 邮件独立重建事实 ${summary.appliedFactCount} 条（不读 out/facts.jsonl）`,
     `  订单：${summary.orders} 单，事件时间范围 ${etTimeLabel(firstAt)} ~ ${etTimeLabel(lastAt)}；` +
       `药房 ${week.pharmacies.length} 家`,
   ];
@@ -1495,7 +1858,6 @@ export interface CliOptions {
   weekFile: string;
   decisionsFile: string;
   runLogFile: string;
-  factsFile: string;
   help: boolean;
 }
 
@@ -1506,12 +1868,12 @@ const USAGE = `独立安全求值器（ARCHITECTURE §12.5）
   node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/verify.ts
 
 输入路径（CLI 优先，其次环境变量，最后默认）：
-  --week <path>        / WEEK_FILE        默认 sim/week-a.jsonl
+  --week <path>        / WEEK_FILE        默认 sim/week-a.jsonl（config + 邮件 + 订单）
   --decisions <path>   / DECISIONS_FILE   默认 out/decisions.jsonl
   --run-log <path>     / RUN_LOG_FILE     默认 out/run-log.jsonl
-  --facts <path>       / FACTS_FILE       默认 out/facts.jsonl
   -h, --help
 
+事实来源是 week 文件的 config + 邮件事件，不读 out/facts.jsonl（§12.5）。
 退出码：0 = 全部通过；1 = 有不安全/不一致；2 = 无法运行（缺文件或 week 配置坏）。
 先跑完整周回放再 verify：
   LLM_MODE=replay npm start
@@ -1543,7 +1905,6 @@ export function parseOptions(argv: readonly string[], env: Record<string, string
     weekFile: readOption(argv, '--week', env, 'WEEK_FILE', 'sim/week-a.jsonl'),
     decisionsFile: readOption(argv, '--decisions', env, 'DECISIONS_FILE', 'out/decisions.jsonl'),
     runLogFile: readOption(argv, '--run-log', env, 'RUN_LOG_FILE', 'out/run-log.jsonl'),
-    factsFile: readOption(argv, '--facts', env, 'FACTS_FILE', 'out/facts.jsonl'),
     help: argv.includes('--help') || argv.includes('-h'),
   };
 }
@@ -1592,8 +1953,7 @@ export function runVerify(options: CliOptions): VerifyReport {
   const weekRows = loadJsonlRows(resolvePath(options.weekFile), 'week');
   const decisionRows = loadJsonlRows(resolvePath(options.decisionsFile), '决策审计');
   const runLogRows = loadJsonlRows(resolvePath(options.runLogFile), '发单日志');
-  const factRows = loadJsonlRows(resolvePath(options.factsFile), '事实审计');
-  return verifyFromRows({ weekRows, decisionRows, runLogRows, factRows });
+  return verifyFromRows({ weekRows, decisionRows, runLogRows });
 }
 
 /** 从原始 JSONL 行验证（导出给 `test/guards/verify-core.test.ts` 用合成数据测试）。 */
@@ -1602,7 +1962,8 @@ export function verifyFromRows(input: RawVerifyInput): VerifyReport {
   const week = parseWeek(input.weekRows);
   const decisions = parseDecisions(input.decisionRows, Object.keys(week.catalogue), inputFailures);
   const runLog = parseRunLog(input.runLogRows, inputFailures);
-  const facts = parseFacts(input.factRows, inputFailures);
+  // 事实从 week 的 config + 邮件独立重建（不读 out/facts.jsonl，§12.5/§5.4）。
+  const facts = deriveFactsFromWeek(week);
   return verifyModel({ week, decisions, runLog, facts, inputFailures });
 }
 

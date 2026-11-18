@@ -5,23 +5,30 @@
 
 ## 1. 仓库现状
 
-- 当前处于**文档阶段**：仓库里只有 `docs/` 和题目自带的 `sim/`，没有应用代码、
-  没有 `package.json`、没有 npm scripts。
+- 当前处于**实现阶段**：`src/`（kernel/domain/application/adapters/interfaces/wiring 六层）、
+  `test/`（unit / contract / integration / guards）、`scripts/verify.ts`、`package.json`
+  都已就位；`npm start` 起 `POST /webhooks` 单进程服务。交付说明见根 [`README.md`](README.md)。
+- 验证命令：`npm test`（473 项：单元 + 契约 + 整周回放 + 重启 + 守卫）、`npm run typecheck`、
+  `npm run verify`（独立安全求值器，需先跑整周回放产出 `out/`）；离线演示用
+  `LLM_MODE=replay npm start`（不需要 API key，抽取结果从 `test/fixtures/llm/` 回放）。
 - 已有**架构设计**（[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）：分层、模块、
-  类签名、不变量、失败矩阵、实现切片都定在这里，但**它不含实现**。
+  类签名、不变量、失败矩阵、实现切片都与实现对齐（§13.1 的运行器选择、§20 的实现记录已更新）。
 - 已有**推演文档**（[`docs/WALKTHROUGHS.md`](docs/WALKTHROUGHS.md)）：按邮件类型逐个
   走「入站 → 抽取 → 校验 → 落地 → 审计 → 影响订单」的每一步；改邮件流水线前先对照它。
-- 除非用户明确要求，不要创建实现代码或脚手架；默认工作是阅读、核对与维护文档。
+- 默认工作是维护实现与文档一致：**行为**先改 `REQUIREMENTS.md`、**形状**先改
+  `DATA-CONTRACTS.md`、**结构**先改 `ARCHITECTURE.md`；改完实现后跑上面三条验证命令，
+  并保持 `README.md` 的「已知错误 / 未测」两节诚实。
 
 ## 2. 文档入口
 
 | 文件 | 作用 |
 |---|---|
+| [`README.md`](README.md) | **交付说明**：做了什么、怎么跑、9 个问题的回答、验收记录 |
 | [`docs/README.md`](docs/README.md) | 文档索引、阅读顺序、权威顺序、术语表 |
 | [`docs/ASSIGNMENT.md`](docs/ASSIGNMENT.md) | 面试题本身：时间盒、交付物、README 的 9 个问题、评分方式 |
 | [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | 需求与路由策略（唯一行为规范） |
 | [`docs/DATA-CONTRACTS.md`](docs/DATA-CONTRACTS.md) | 数据契约、接口形状、week A 已核对事实 |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 架构设计：分层、模块与类、时序、不变量、失败矩阵、实现切片（设计，不含实现） |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 架构设计：分层、模块与类、时序、不变量、失败矩阵、实现切片 |
 | [`docs/WALKTHROUGHS.md`](docs/WALKTHROUGHS.md) | 逐类型数据流推演：一封邮件从入站到响应、再到影响订单的每一步（22 条场景 + 20 条断言） |
 | [`README.upstream.md`](README.upstream.md) | 上游英文题目原文，只读 |
 | [`sim/README.md`](sim/README.md) | 模拟器与外部契约原文，只读 |

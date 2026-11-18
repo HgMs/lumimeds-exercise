@@ -148,6 +148,9 @@ src/
       interval.ts                 # Interval：from/until(排他)、covers()
 
   domain/
+    types.ts                      # 跨模块值类型：ID 别名、Iso、Normalized<T>（实现补充）
+    config.ts                     # 外部 config 形状：SimConfig/PharmacyConfig（实现补充）
+    events.ts                     # 入站事件信封与 payload 类型（实现补充）
     catalogue.ts                  # Catalogue：目录（药 → 剂量集合），不可变
     pharmacy.ts                   # PharmacyBase、PharmacyRegistry（id/名称/联系人解析）
     normalize/
@@ -1798,7 +1801,10 @@ fixture 为准并查清原因。本设计文档不把它逐行抄一遍的理由
 - 不读 `out/facts.jsonl` 重建信念——那份文件按契约只有邮件行，基础事实不在里面
   （§5.4）。事实来源一律从 `week-a.jsonl` 的 config + 邮件重新推导。
 - 不校验「邮件解析得对不对」——那是 `test/integration` 与 §14.1 抽样的事。
-- 不做时间短语解析，只认 `from/until` 的绝对 ISO 值。
+- 不做通用 NLP / 不 import 应用的抽取代码：对 week 文件里的邮件按规范语义做**显式重建**
+  （只覆盖 week A 出现的句式：until/from/back on <weekday>、tomorrow、复合路由偏好、
+  容量 N/天、州全名等），与新实现共享「对规范的理解」但不共享代码。需要支持隐藏周时，
+  给 verify 补句式，而不是把 `FactValidator` import 进来。
 
 代价：约 150 行、不是最初估的 120 行 15 分钟；在 §13 的裁剪表里它是**可砍项**
 （砍了只剩单测与 fixture 对照）。
@@ -1814,19 +1820,20 @@ fixture 为准并查清原因。本设计文档不把它逐行抄一遍的理由
 
 | 决定 | 值 | 理由 |
 |---|---|---|
-| `Node` | **≥ 22.9** | 需要 `--env-file-if-exists`（22.9 起）；运行器用 `tsx`，不用 `--experimental-transform-types`，所以参数属性可以保留 |
-| 运行器 | `tsx`（devDependency） | 零**运行时**依赖不变；比实验性 flag 稳，报错可读 |
-| 启动 | `npm start` = `tsx --env-file-if-exists=.env src/index.ts` | `.env` 缺失时不炸（Node ≥ 22.9 的 `--env-file-if-exists`） |
-| 类型检查 | `npm run typecheck` = `tsc --noEmit` | `tsx` 只剥离类型、不做检查 |
-| 测试 | `npm test` = `node --import tsx --test test/**/*.test.ts` | 用 `node:test`，不引框架 |
-| 验证 | `npm run verify` = `tsx scripts/verify.ts` | 见 §12.5 |
-| 模块 | ESM，相对 import **带 `.ts` 后缀** | `sim/README.md` 明确提示；tsx 与 Node 原生剥离都认 |
+| `Node` | **≥ 22.9** | 需要 `--env-file-if-exists`（22.9 起）；运行器用 Node 原生 type 转换，所以参数属性可以保留 |
+| 运行器 | **Node 原生 `--experimental-transform-types`**（实现时定案，替代草案里的 `tsx`） | 零 devDependency、离线可用，`npm install` 只剩 `typescript` + `@types/node`；transform 模式支持参数属性与 enum（本实现不用 enum）。代价：纯类型导入必须写 `import type`，由 `verbatimModuleSyntax` 强制 |
+| 启动 | `npm start` = `node --experimental-transform-types --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/index.ts` | `.env` 缺失时不炸（Node ≥ 22.9 的 `--env-file-if-exists`） |
+| 类型检查 | `npm run typecheck` = `tsc --noEmit` | 运行时只剥离/转换类型、不做检查 |
+| 测试 | `npm test` = `node --experimental-transform-types --experimental-test-isolation=none --test "test/**/*.test.ts"` | 用 `node:test`，不引框架；`isolation=none` 让测试在单进程内跑（兼容禁用子进程管道的受限环境） |
+| 验证 | `npm run verify` = `node --experimental-transform-types scripts/verify.ts` | 见 §12.5 |
+| 模块 | ESM，相对 import **带 `.ts` 后缀** | `sim/README.md` 明确提示；Node 原生 type 转换认 |
 | 缺 key | 启动即 `exit(1)` 并打印修复步骤 | core 要求「LLM 读邮件」，静默降级更糟 |
-| 无 key 演示 | `npm start -- --replay`（`LLM_MODE=replay`） | 只用于离线演示/测试，**不进 README 的正式跑法** |
+| 无 key 演示 | `LLM_MODE=replay npm start` | 只用于离线演示/测试，**不进 README 的正式跑法** |
 
-⚠️ 签名草案里大量使用参数属性（`constructor(private readonly x: T)`）。若最后选择
-Node 原生剥离而不是 `tsx`，这些签名必须改写——这是**选择运行器会影响 40+ 处签名**的
-地方，所以放在 S1 定死，不留到后面。
+⚠️ 签名草案里大量使用参数属性（`constructor(private readonly x: T)`）。Node 的
+`--experimental-transform-types` 支持参数属性（已由全仓类型检查与运行时验证），因此
+签名不需要改写；但**纯类型导入必须显式写 `import type`**，否则运行时会去 import 一个
+不存在的运行时绑定——`tsconfig` 的 `verbatimModuleSyntax` 会在类型检查阶段就拦下。
 
 ### 13.2 切片（125 分钟：120 分钟构建 + 5 分钟缓冲；README 的 15 分钟另算）
 
@@ -2196,13 +2203,35 @@ exit 0（唯一一种静默成功）；缓冲事件等 `started` 会违反「先
 
 ---
 
-## 20. 下一步（不在本文范围）
+## 20. 实现状态与实现期补充决定（2026-11-18）
 
-1. §16 的待拍板项已全部定案（Q3/Q4/Q10/Q17，2026-11-18）；后续只做实现核对，不再有
-   需要确认的设计分叉。
-2. 按 §13.1 的结论收敛运行方式（`tsx` + `--env-file-if-exists`，Node ≥ 22.9）；这一步已经
-   在 §13.1 定死，实现时只需复核 `tsx` 是否原样转发该 flag。
-3. 按 §13.2 的 S1–S8 建 `src/`（新开一轮，不在本轮做）；`core done` 之后再用
-   `WALKTHROUGHS.md` §6 的 20 条断言反推测试。
-4. 代码就绪后让实现跑出 `decisions.jsonl`，再人工只核 `evt_*` 影响的 6–8 单，最后落
-   `test/fixtures/week-a.expected.json`（不要手推 38 行：评审 A1/A2 已证明会错）。
+S1–S8 已全部落地（`src/` 六层 + `test/` 四层 + `scripts/verify.ts`），验证证据见根
+[`README.md`](../README.md) 的「验收记录」。实现期在**不改变行为**的前提下补了几个工程
+决定，登记如下：
+
+1. **运行器**：按 §13.1 的最终结论改用 Node 原生 `--experimental-transform-types`（不是
+   `tsx`）；纯类型导入必须 `import type`，由 `tsconfig` 的 `verbatimModuleSyntax` 强制。
+   测试用 `--experimental-test-isolation=none`（受限环境禁止子进程管道）。
+2. **跨模块契约文件**：新增 `src/domain/types.ts`（ID 别名 + `Normalized<T>`）、
+   `src/domain/config.ts`（外部 config 形状）、`src/domain/events.ts`（入站事件类型），
+   避免同形状类型在多个文件重复定义；`src/application/ports/**` 由 lead 先行写死。
+3. **命名边界**：`Fact`/`RoutingDecision`/`SamEntry` 等领域类型保持 camelCase；落盘/审计在
+   `SnapshotMapper`/`AuditRecorder` 统一转 snake_case。`PersistedState`/`PersistedFact` 定义在
+   `application/ports/state-store.ts`，domain 内不 import application（遵守 R2）。
+4. **`ExtractionInput` 新增 `eventId`**：`ReplayExtractor` 按 `event_id` 回放 fixture；live
+   抽取器忽略它，线上行为不变。
+5. **`AuditSink.decision` 接收 `PersistedRoutingDecision`**：审计文件是 snake_case，转换在
+   `AuditRecorder`/`SnapshotMapper` 完成，adapter 不依赖领域时间格式化。
+6. **`SnapshotMapper` 构造只依赖 `{calendar}`**：registry/catalogue 从快照的 `config` 重建，
+   这样恢复流程在会话创建前就能构造 mapper。
+7. **`pharmacyApi` 注入**：`StartSimulationUseCase` 调 `gateway.setBaseUrl(evt.pharmacyApi)`；
+   恢复路径由 wiring 在 `restoreSession()` 里用快照的 `pharmacy_api` 先注入（§6.3/B2）。
+8. **`out/facts.jsonl` 的 routing_preference 行**输出 `medication`（可选的 `dose`/`state`
+   按实际给出），否则审计无法解释「改的是哪个药品的偏好」（承接 §17.4 的可解释性要求）。
+9. **`docs/ARCHITECTURE.md` §14.2 的说明列已修正**：11-11 发往 VELMORA 的三单里
+   `ORD-3003/3007` 是 ops 偏好命中，`ORD-3011` 是 tirzepatide 单（偏好只约束 semaglutide），
+   走 rank；§14.2 的药房归属本身不变。
+
+实现期的边界（与 §17 一致）：真实 LLM 只有契约测试（开发环境无 API key）；`409` 恢复窗口与
+「推迟单只存在内存」两个窗口仍是已知 exit-1 风险，README「已知错误」已点名；`verify` 的
+独立事实重建只覆盖 week A 出现的句式，隐藏周需要补句式。
