@@ -5,7 +5,8 @@
 >
 > This document is the contract the implementation is written against. Anything the
 > implementation deliberately does differently is recorded in the final `README.md`
-> under "ambiguous rules" and "known gaps".
+> under "ambiguous rules" and "known gaps". A Chinese translation lives in
+> [`REQUIREMENTS.zh-CN.md`](REQUIREMENTS.zh-CN.md).
 
 ## 0. Scope
 
